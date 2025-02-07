@@ -5,7 +5,9 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { signIn } from '@/auth';
 import { AuthError } from 'next-auth';
+import { randomUUID } from 'crypto';
 
+const bcrypt = require('bcrypt');
 
 const FormSchema = z.object({
   id: z.string(),
@@ -20,7 +22,7 @@ const FormSchema = z.object({
   }),
   date: z.string(),
 });
-   
+
 const CreateInvoice = FormSchema.omit({ id: true, date: true });
 
 export type State = {
@@ -39,7 +41,7 @@ export async function createInvoice(prevState: State, formData: FormData) {
     amount: formData.get('amount'),
     status: formData.get('status'),
   });
- 
+
   // If form validation fails, return errors early. Otherwise, continue.
   if (!validatedFields.success) {
     return {
@@ -47,12 +49,12 @@ export async function createInvoice(prevState: State, formData: FormData) {
       message: 'Missing Fields. Failed to Create Invoice.',
     };
   }
- 
+
   // Prepare data for insertion into the database
   const { customerId, amount, status } = validatedFields.data;
   const amountInCents = amount * 100;
   const date = new Date().toISOString().split('T')[0];
- 
+
   // Insert data into the database
   try {
     await sql`
@@ -65,7 +67,7 @@ export async function createInvoice(prevState: State, formData: FormData) {
       message: 'Database Error: Failed to Create Invoice.',
     };
   }
- 
+
   // Revalidate the cache for the invoices page and redirect the user.
   revalidatePath('/dashboard/invoices');
   redirect('/dashboard/invoices');
@@ -83,17 +85,17 @@ export async function updateInvoice(
     amount: formData.get('amount'),
     status: formData.get('status'),
   });
- 
+
   if (!validatedFields.success) {
     return {
       errors: validatedFields.error.flatten().fieldErrors,
       message: 'Missing Fields. Failed to Update Invoice.',
     };
   }
- 
+
   const { customerId, amount, status } = validatedFields.data;
   const amountInCents = amount * 100;
- 
+
   try {
     await sql`
       UPDATE invoices
@@ -103,15 +105,14 @@ export async function updateInvoice(
   } catch (error) {
     return { message: 'Database Error: Failed to Update Invoice.' };
   }
- 
+
   revalidatePath('/dashboard/invoices');
   redirect('/dashboard/invoices');
 }
 
-
 export async function deleteInvoice(id: string) {
   //throw new Error('Failed to delete invoice');
-  
+
   try {
     await sql`DELETE FROM invoices WHERE id = ${id}`;
     revalidatePath('/dashboard/invoices');
@@ -137,5 +138,61 @@ export async function authenticate(
       }
     }
     throw error;
+  }
+}
+
+const RegisterSchema = z.object({
+  name: z.string(),
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
+export async function registerUser(
+  prevState: string | undefined,
+  formData: FormData,
+): Promise<string | undefined> {
+  // Validate form data
+  const parsedData = RegisterSchema.safeParse({
+    name: formData.get('name'),
+    email: formData.get('email'),
+    password: formData.get('password'),
+  });
+
+  if (!parsedData.success) {
+    console.log('Validation failed:', parsedData.error);
+    return 'Invalid credentials.';
+  }
+
+  const { name, email, password } = parsedData.data;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const userId = randomUUID();
+
+  try {
+    const existingUser = await sql`
+      SELECT email FROM users WHERE email = ${email}
+    `;
+
+    if (existingUser.rows.length > 0) {
+      return 'User with this email already exists.';
+    }
+
+    await sql`
+      INSERT INTO users (id, name, email, password)
+      VALUES (${userId}, ${name}, ${email}, ${hashedPassword})
+    `;
+
+    // Automatically sign in the user after registration
+    await signIn('credentials', {
+      email,
+      password,
+      redirect: false,
+    });
+
+    revalidatePath('/login');
+    console.log('User inserted successfully');
+    return undefined;
+  } catch (error) {
+    console.error('Failed to register user:', error);
+    return 'Something went wrong.';
   }
 }
